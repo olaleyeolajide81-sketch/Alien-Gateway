@@ -1,10 +1,12 @@
 #![no_std]
 
 pub mod events;
+pub mod types;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
 };
+use types::ResolveData;
 
 #[contract]
 pub struct Contract;
@@ -13,13 +15,6 @@ pub struct Contract;
 #[derive(Clone)]
 pub enum DataKey {
     Resolver(BytesN<32>),
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct ResolveData {
-    pub wallet: Address,
-    pub memo: Option<u64>,
 }
 
 #[contracterror]
@@ -37,12 +32,27 @@ impl Contract {
         env.storage().persistent().set(&key, &data);
     }
 
-    pub fn resolve(env: Env, commitment: BytesN<32>) -> ResolveData {
+    pub fn set_memo(env: Env, commitment: BytesN<32>, memo_id: u64) {
+        let key = DataKey::Resolver(commitment);
+        let mut data = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ResolveData>(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ResolverError::NotFound));
+
+        data.memo = Some(memo_id);
+        env.storage().persistent().set(&key, &data);
+    }
+
+    pub fn resolve(env: Env, commitment: BytesN<32>) -> (Address, Option<u64>) {
         let key = DataKey::Resolver(commitment);
 
         match env.storage().persistent().get::<DataKey, ResolveData>(&key) {
-            Some(data) => data,
+            Some(data) => (data.wallet, data.memo),
             None => panic_with_error!(&env, ResolverError::NotFound),
         }
     }
 }
+
+#[cfg(test)]
+mod test;
