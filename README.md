@@ -60,5 +60,10 @@ They are stored as **zero-knowledge commitments**, protecting user identity and 
 
 Alien Gateway aims to become the **identity and payment resolution layer for the Stellar ecosystem**.
 
----
+## 🌐 Connect with us
 
+<p align="center">
+  <a href="https://t.me/alien_protocol_xyz">
+    <img src="https://img.shields.io/badge/Telegram-Join%20Alien%20Protocol-2CA5E0?logo=telegram&logoColor=white&style=for-the-badge"/>
+  </a>
+</p>
