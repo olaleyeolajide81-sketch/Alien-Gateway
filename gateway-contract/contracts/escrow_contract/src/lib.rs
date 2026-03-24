@@ -232,7 +232,11 @@ impl EscrowContract {
 
         // 5. Transfer tokens from contract to recipient
         let token_client = token::Client::new(&env, &auto_pay.token);
-        token_client.transfer(&env.current_contract_address(), &recipient, &auto_pay.amount);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &auto_pay.amount,
+        );
 
         // 6. Decrement vault balance
         vault.balance -= auto_pay.amount;
