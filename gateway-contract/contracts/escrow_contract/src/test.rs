@@ -182,7 +182,7 @@ fn test_auto_pay_setup_success() {
         1000,
     );
 
-    client.setup_auto_pay(&from, &to, &100, &10);
+    client.setup_auto_pay(&from, &to, &100i128, &10u64);
 
     env.as_contract(&contract_id, || {
         let auto_pay: AutoPay = env
@@ -220,7 +220,7 @@ fn test_auto_pay_trigger_success() {
         50,
     );
 
-    client.setup_auto_pay(&from, &to, &200, &10);
+    client.setup_auto_pay(&from, &to, &200i128, &10u64);
     env.ledger().set_timestamp(10);
     client.trigger_auto_pay(&from);
 
@@ -263,7 +263,7 @@ fn test_auto_pay_early_trigger_panics() {
         0,
     );
 
-    client.setup_auto_pay(&from, &to, &100, &10);
+    client.setup_auto_pay(&from, &to, &100i128, &10u64);
     env.ledger().set_timestamp(9);
     client.trigger_auto_pay(&from);
 }
@@ -291,7 +291,7 @@ fn test_auto_pay_second_cycle_success() {
         0,
     );
 
-    client.setup_auto_pay(&from, &to, &150, &10);
+    client.setup_auto_pay(&from, &to, &150i128, &10u64);
 
     env.ledger().set_timestamp(10);
     client.trigger_auto_pay(&from);
@@ -337,7 +337,7 @@ fn test_auto_pay_insufficient_balance_panics() {
         0,
     );
 
-    client.setup_auto_pay(&from, &to, &100, &10);
+    client.setup_auto_pay(&from, &to, &100i128, &10u64);
     env.ledger().set_timestamp(10);
     client.trigger_auto_pay(&from);
 }
