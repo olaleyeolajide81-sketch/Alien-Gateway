@@ -8,6 +8,9 @@ pub mod events;
 pub mod storage;
 pub mod types;
 
+#[cfg(test)]
+mod test;
+
 use crate::errors::EscrowError;
 use crate::events::Events;
 use crate::storage::{increment_payment_id, read_vault, write_scheduled_payment, write_vault};
