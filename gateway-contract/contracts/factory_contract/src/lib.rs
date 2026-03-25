@@ -52,7 +52,12 @@ impl FactoryContract {
         };
 
         set_username_record(&env, &record);
-        emit_username_deployed(&env, &record);
+        emit_username_deployed(
+            &env,
+            &record.username_hash,
+            &record.owner,
+            record.registered_at,
+        );
     }
 
     pub fn get_username_record(env: Env, username_hash: BytesN<32>) -> Option<UsernameRecord> {
