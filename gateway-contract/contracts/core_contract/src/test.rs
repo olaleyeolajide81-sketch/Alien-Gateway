@@ -625,7 +625,11 @@ fn test_transfer_succeeds() {
     // env.events().all() returns events from the most recent as_contract scope.
     // Verify: TRANSFER event emitted (ROOT_UPD from SmtRoot::update_root + TRANSFER = 2)
     let events = env.events().all();
-    assert_eq!(events.len(), 2, "ROOT_UPD and TRANSFER events must both be emitted");
+    assert_eq!(
+        events.len(),
+        2,
+        "ROOT_UPD and TRANSFER events must both be emitted"
+    );
 
     // Verify: new owner set and SMT root updated
     // (client calls do not create a new as_contract scope, so event count above is stable)
