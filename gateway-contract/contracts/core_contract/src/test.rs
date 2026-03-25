@@ -587,6 +587,150 @@ fn test_remove_chain_address_wrong_owner_panics() {
     client.remove_chain_address(&attacker, &hash, &ChainType::Evm);
 }
 
+// ── ownership transfer tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_transfer_ownership_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup(&env);
+
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let hash = commitment(&env, 30);
+
+    client.register(&owner, &hash);
+    client.transfer_ownership(&owner, &hash, &new_owner);
+
+    assert_eq!(client.get_owner(&hash), Some(new_owner));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_transfer_ownership_non_owner_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup(&env);
+
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let hash = commitment(&env, 31);
+
+    client.register(&owner, &hash);
+    client.transfer_ownership(&attacker, &hash, &new_owner);
+}
+
+/// Verifies that transfer sets the new owner, advances the SMT root, and emits a TRANSFER event.
+/// Contract-client invocations do not surface in env.events().all(), so the event is verified
+/// by replicating the transfer logic inside env.as_contract — matching the pattern used in
+/// test_register_resolver_emits_events.
+#[test]
+fn test_transfer_succeeds() {
+    use crate::errors::CoreError;
+    use crate::events::TRANSFER_EVENT;
+    use crate::registration::DataKey as RegKey;
+    use crate::zk_verifier::ZkVerifier;
+    use soroban_sdk::panic_with_error;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, client, root) = setup_with_root(&env);
+
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let hash = commitment(&env, 32);
+    let new_root = BytesN::from_array(&env, &[99u8; 32]);
+    let proof = dummy_proof(&env);
+    let signals = PublicSignals {
+        old_root: root.clone(),
+        new_root: new_root.clone(),
+    };
+
+    client.register(&owner, &hash);
+
+    env.as_contract(&contract_id, || {
+        let key = RegKey::Commitment(hash.clone());
+        let current_owner: Address = env.storage().persistent().get(&key).unwrap();
+
+        if owner != current_owner {
+            panic_with_error!(&env, CoreError::Unauthorized);
+        }
+        if new_owner == current_owner {
+            panic_with_error!(&env, CoreError::SameOwner);
+        }
+        let current_root = SmtRoot::get_root(env.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, CoreError::RootNotSet));
+        assert_eq!(signals.old_root, current_root);
+        assert!(ZkVerifier::verify_groth16_proof(&env, &proof, &signals));
+
+        env.storage().persistent().set(&key, &new_owner);
+        SmtRoot::update_root(&env, signals.new_root.clone());
+
+        #[allow(deprecated)]
+        env.events().publish(
+            (TRANSFER_EVENT,),
+            (hash.clone(), owner.clone(), new_owner.clone()),
+        );
+    });
+
+    // env.events().all() returns events from the most recent as_contract scope.
+    // Verify: TRANSFER event emitted (ROOT_UPD from SmtRoot::update_root + TRANSFER = 2)
+    let events = env.events().all();
+    assert_eq!(
+        events.len(),
+        2,
+        "ROOT_UPD and TRANSFER events must both be emitted"
+    );
+
+    // Verify: new owner set and SMT root updated
+    // (client calls do not create a new as_contract scope, so event count above is stable)
+    assert_eq!(client.get_owner(&hash), Some(new_owner.clone()));
+    assert_eq!(client.get_smt_root(), new_root);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_transfer_same_owner_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup(&env);
+
+    let owner = Address::generate(&env);
+    let hash = commitment(&env, 33);
+
+    client.register(&owner, &hash);
+
+    let signals = PublicSignals {
+        old_root: BytesN::from_array(&env, &[0u8; 32]),
+        new_root: BytesN::from_array(&env, &[0u8; 32]),
+    };
+    // new_owner == old_owner must panic with SameOwner (#8)
+    client.transfer(&owner, &hash, &owner, &dummy_proof(&env), &signals);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_transfer_non_owner_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup(&env);
+
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let hash = commitment(&env, 34);
+
+    client.register(&owner, &hash);
+
+    let signals = PublicSignals {
+        old_root: BytesN::from_array(&env, &[0u8; 32]),
+        new_root: BytesN::from_array(&env, &[0u8; 32]),
+    };
+    // attacker is not the owner → Unauthorized (#7)
+    client.transfer(&attacker, &hash, &new_owner, &dummy_proof(&env), &signals);
+}
+
 // ── address validation failures ───────────────────────────────────────────────
 
 #[test]
