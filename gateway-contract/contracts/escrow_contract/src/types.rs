@@ -12,8 +12,12 @@ pub enum DataKey {
     ScheduledPayment(u32),
     /// Key for the auto-incrementing payment counter in instance storage.
     PaymentCounter,
-    /// Key for an auto-payment rule, indexed by the source vault's commitment.
-    AutoPay(BytesN<32>),
+    /// Key for an auto-payment rule, indexed by the source vault's commitment and a rule ID.
+    AutoPay(BytesN<32>, u64),
+    /// Key for the auto-incrementing auto-pay counter in instance storage.
+    AutoPayCounter,
+    /// Legacy key for a vault record (pre-split architecture). Kept for backward compatibility.
+    Vault(BytesN<32>),
     /// Key for the Registration contract address stored in instance storage.
     RegistrationContract,
 }
@@ -56,6 +60,17 @@ pub struct ScheduledPayment {
     pub release_at: u64,
     /// Whether the payment has already been executed.
     pub executed: bool,
+}
+
+/// Legacy combined vault record (pre-split architecture). Used only for backward-compatible reads.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyVault {
+    pub owner: Address,
+    pub token: Address,
+    pub created_at: u64,
+    pub balance: i128,
+    pub is_active: bool,
 }
 
 /// Represents a recurring automatic payment rule between two vaults.

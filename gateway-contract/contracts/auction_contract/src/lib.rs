@@ -6,6 +6,20 @@ pub mod events;
 pub mod storage;
 pub mod types;
 
+// Ensure event symbols are linked from the main contract entrypoint module.
+use crate::events::{AUCTION_CLOSED, AUCTION_CREATED, BID_PLACED, BID_REFUNDED, USERNAME_CLAIMED};
+
+#[allow(dead_code)]
+fn _touch_event_symbols() {
+    let _ = (
+        AUCTION_CREATED,
+        BID_PLACED,
+        AUCTION_CLOSED,
+        USERNAME_CLAIMED,
+        BID_REFUNDED,
+    );
+}
+
 #[cfg(test)]
 mod test;
 
@@ -14,26 +28,59 @@ pub struct AuctionContract;
 
 #[contractimpl]
 impl AuctionContract {
+    pub fn close_auction(
+        env: Env,
+        username_hash: BytesN<32>,
+    ) -> Result<(), crate::errors::AuctionError> {
+        let status = storage::get_status(&env);
+
+        // Reject if status is not Open
+        if status != types::AuctionStatus::Open {
+            return Err(crate::errors::AuctionError::AuctionNotOpen);
+        }
+
+        // Get current ledger timestamp and end time
+        let current_time = env.ledger().timestamp();
+        let end_time = storage::get_end_time(&env);
+
+        // Reject if timestamp < end_time
+        if current_time < end_time {
+            return Err(crate::errors::AuctionError::AuctionNotClosed);
+        }
+
+        // Set status to Closed
+        storage::set_status(&env, types::AuctionStatus::Closed);
+
+        // Get winner and winning bid
+        let winner = storage::get_highest_bidder(&env);
+        let winning_bid = storage::get_highest_bid(&env);
+
+        // Emit AUCTION_CLOSED event with winner and winning bid
+        events::emit_auction_closed(&env, &username_hash, winner.clone(), winning_bid);
+
+        Ok(())
+    }
+
     pub fn claim_username(
         env: Env,
         username_hash: BytesN<32>,
         claimer: Address,
-    ) -> Result<(), crate::errors::Error> {
+    ) -> Result<(), crate::errors::AuctionError> {
         claimer.require_auth();
 
         let status = storage::get_status(&env);
 
         if status == types::AuctionStatus::Claimed {
-            return Err(crate::errors::Error::AlreadyClaimed);
+            return Err(crate::errors::AuctionError::AlreadyClaimed);
         }
 
         if status != types::AuctionStatus::Closed {
-            return Err(crate::errors::Error::NotClosed);
+            return Err(crate::errors::AuctionError::NotClosed);
         }
 
         let highest_bidder = storage::get_highest_bidder(&env);
         if !highest_bidder.map(|h| h == claimer).unwrap_or(false) {
-            return Err(crate::errors::Error::NotWinner);
+            return Err(crate::errors::AuctionError::NotWinner);
         }
 
         // Set status to Claimed
@@ -42,10 +89,10 @@ impl AuctionContract {
         // Call factory_contract.deploy_username(username_hash, claimer)
         let factory = storage::get_factory_contract(&env);
         if factory.is_none() {
-            return Err(crate::errors::Error::NoFactoryContract);
+            return Err(crate::errors::AuctionError::NoFactoryContract);
         }
 
-        let factory_addr = factory.ok_or(crate::errors::Error::NoFactoryContract)?;
+        let factory_addr = factory.ok_or(crate::errors::AuctionError::NoFactoryContract)?;
         env.invoke_contract::<()>(
             &factory_addr,
             &Symbol::new(&env, "deploy_username"),

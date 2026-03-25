@@ -76,6 +76,15 @@ fn create_vault(
     });
 }
 
+fn read_vault(env: &Env, contract_id: &Address, id: &BytesN<32>) -> VaultState {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Vault(id.clone()))
+            .unwrap()
+    })
+}
+
 #[test]
 fn test_schedule_payment_success() {
     let env = Env::default();
@@ -108,6 +117,14 @@ fn test_schedule_payment_success() {
             .unwrap();
         assert_eq!(state.balance, initial_balance - amount);
 
+        // Verify VaultConfig is unmodified after payment scheduling
+        let config: VaultConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultConfig(from.clone()))
+            .unwrap();
+        assert_eq!(config.token, token);
+
         // Verify ScheduledPayment stored correctly
         let payment: ScheduledPayment = env
             .storage()
@@ -120,6 +137,37 @@ fn test_schedule_payment_success() {
         assert_eq!(payment.release_at, release_at);
         assert_eq!(payment.executed, false);
     });
+}
+
+#[test]
+fn test_schedule_payment_inactive_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, client, token, _, from, to) = setup_test(&env);
+
+    // Seed vault with is_active: false
+    let config = VaultConfig {
+        owner: Address::generate(&env),
+        token: token.clone(),
+        created_at: 0,
+    };
+    let state = VaultState {
+        balance: 1000,
+        is_active: false,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultConfig(from.clone()), &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultState(from.clone()), &state);
+    });
+
+    env.ledger().set_timestamp(1000);
+
+    let result = client.try_schedule_payment(&from, &to, &100, &2000);
+    assert_eq!(result, Err(Ok(EscrowError::VaultInactive)));
 }
 
 #[test]
@@ -400,4 +448,45 @@ fn test_execute_scheduled_rejects_double_execution() {
         result,
         Err(Ok(err)) if err == Error::from_contract_error(EscrowError::PaymentAlreadyExecuted as u32)
     ));
+}
+
+#[test]
+fn test_cancel_vault_refunds_and_inactivates() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, client, token, _, from, to) = setup_test(&env);
+
+    let owner = Address::generate(&env);
+    let initial_balance = 1000i128;
+
+    create_vault(&env, &contract_id, &from, &owner, &token, initial_balance);
+
+    // Ensure the contract actually holds tokens to refund.
+    let token_admin_client = StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&contract_id, &initial_balance);
+
+    client.cancel_vault(&from);
+
+    // Vault state must be inactive and zeroed.
+    env.as_contract(&contract_id, || {
+        let state: VaultState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultState(from.clone()))
+            .unwrap();
+        assert_eq!(state.is_active, false);
+        assert_eq!(state.balance, 0);
+    });
+
+    // Tokens must be refunded to the vault owner.
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&owner), initial_balance);
+    assert_eq!(token_client.balance(&contract_id), 0);
+
+    // Event emission is handled by `Events::vault_cancel`.
+
+    // Subsequent scheduling must fail with VaultInactive.
+    env.ledger().set_timestamp(1000);
+    let result = client.try_schedule_payment(&from, &to, &100, &2000);
+    assert_eq!(result, Err(Ok(EscrowError::VaultInactive)));
 }

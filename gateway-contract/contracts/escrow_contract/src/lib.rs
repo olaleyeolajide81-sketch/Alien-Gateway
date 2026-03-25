@@ -14,10 +14,11 @@ mod test;
 use crate::errors::EscrowError;
 use crate::events::Events;
 use crate::storage::{
-    increment_payment_id, read_registration_contract, read_vault_config, read_vault_state,
-    write_registration_contract, write_scheduled_payment, write_vault_config, write_vault_state,
+    increment_auto_pay_id, increment_payment_id, read_auto_pay, read_registration_contract,
+    read_vault_config, read_vault_state, write_auto_pay, write_registration_contract,
+    write_scheduled_payment, write_vault_config, write_vault_state,
 };
-use crate::types::{DataKey, ScheduledPayment, VaultConfig, VaultState};
+use crate::types::{AutoPay, DataKey, ScheduledPayment, VaultConfig, VaultState};
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, vec, Address, BytesN, Env, IntoVal, Symbol,
 };
@@ -201,6 +202,13 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::PaymentNotYetDue);
         }
 
+        // Reject execution if the source vault was cancelled.
+        let state = read_vault_state(&env, &payment.from)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::VaultNotFound));
+        if !state.is_active {
+            panic_with_error!(&env, EscrowError::VaultInactive);
+        }
+
         let recipient = resolve(&env, &payment.to);
         let token_client = token::Client::new(&env, &payment.token);
         token_client.transfer(&env.current_contract_address(), &recipient, &payment.amount);
@@ -209,6 +217,174 @@ impl EscrowContract {
         write_scheduled_payment(&env, payment_id, &payment);
 
         Events::pay_exec(&env, payment_id, payment.from, payment.to, payment.amount);
+    }
+
+    /// Cancels an existing vault by commitment.
+    ///
+    /// Marks the vault as inactive and refunds any remaining balance to the owner.
+    /// Once cancelled, no new deposits/payments/auto-pays should be triggerable on it.
+    pub fn cancel_vault(env: Env, commitment: BytesN<32>) {
+        // 1) Load vault config + authenticate as owner.
+        let config = read_vault_config(&env, &commitment)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::VaultNotFound));
+        config.owner.require_auth();
+
+        // 2) Load vault mutable state (panic if vault doesn't exist).
+        let mut state = read_vault_state(&env, &commitment)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::VaultNotFound));
+
+        // 3) Refund any remaining balance.
+        let refunded_amount = if state.balance > 0 {
+            let token_client = token::Client::new(&env, &config.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &config.owner,
+                &state.balance,
+            );
+            state.balance
+        } else {
+            0
+        };
+
+        // 4) Mark inactive and zero balance.
+        state.is_active = false;
+        state.balance = 0;
+        write_vault_state(&env, &commitment, &state);
+
+        // 5) Emit cancellation event.
+        Events::vault_cancel(&env, commitment, refunded_amount);
+    }
+
+    /// Registers a recurring payment rule.
+    ///
+    /// Once registered, calling `trigger_auto_pay` will send `amount` tokens
+    /// every `interval` seconds from the sender's vault to the recipient's resolved address.
+    ///
+    /// ### Arguments
+    /// - `from`: The commitment ID of the source vault.
+    /// - `to`: The commitment ID of the destination vault.
+    /// - `amount`: The amount of tokens to send each interval. Must be > 0.
+    /// - `interval`: The interval in seconds between payments. Must be > 0.
+    ///
+    /// ### Returns
+    /// - `u32`: The unique rule_id assigned to this auto-pay rule.
+    ///
+    /// ### Errors
+    /// - `VaultNotFound`: If the `from` vault does not exist.
+    /// - `InvalidAmount`: If `amount <= 0`.
+    /// - `InvalidInterval`: If `interval == 0`.
+    /// - `AutoPayCounterOverflow`: If the global ID counter overflows.
+    pub fn setup_auto_pay(
+        env: Env,
+        from: BytesN<32>,
+        to: BytesN<32>,
+        amount: i128,
+        interval: u64,
+    ) -> Result<u32, EscrowError> {
+        // 1. Validate Input
+        if amount <= 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+
+        if interval == 0 {
+            return Err(EscrowError::InvalidInterval);
+        }
+
+        // 2. Read Vault config to verify it exists and get the token
+        let config = read_vault_config(&env, &from).ok_or(EscrowError::VaultNotFound)?;
+
+        // 3. Authenticate caller as owner of from vault
+        config.owner.require_auth();
+
+        // 4. Generate AutoPay rule ID
+        let rule_id = increment_auto_pay_id(&env)?;
+
+        // 5. Store AutoPay Rule under composite key (from, rule_id)
+        let auto_pay = AutoPay {
+            from: from.clone(),
+            to: to.clone(),
+            token: config.token.clone(),
+            amount,
+            interval,
+            last_paid: 0,
+        };
+        write_auto_pay(&env, &from, rule_id, &auto_pay);
+
+        // 6. Emit Event
+        Events::auto_set(&env, rule_id, from, to, amount, interval);
+
+        Ok(rule_id)
+    }
+
+    /// Executes one cycle of a recurring auto-pay rule if enough time has passed.
+    ///
+    /// This function is trustless and can be called by anyone (bots, keeper scripts, SDK).
+    /// It checks if the interval has elapsed since the last payment, validates the vault
+    /// balance, transfers the tokens, and updates the state.
+    ///
+    /// ### Arguments
+    /// - `from`: The commitment ID of the source vault that owns the rule.
+    /// - `rule_id`: The unique identifier of the auto-pay rule to trigger.
+    ///
+    /// ### Errors
+    /// - Panics with `AutoPayNotFound` if the auto-pay rule does not exist.
+    /// - Panics with `IntervalNotElapsed` if called before the interval has elapsed.
+    /// - Panics with `VaultNotFound` if the source vault does not exist.
+    /// - Panics with `InsufficientBalance` if the vault balance is less than the payment amount.
+    pub fn trigger_auto_pay(env: Env, from: BytesN<32>, rule_id: u32) {
+        // 1. Load AutoPay rule via composite key
+        let mut auto_pay = read_auto_pay(&env, &from, rule_id)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::AutoPayNotFound));
+
+        // 2. Check if interval has elapsed
+        let current_time = env.ledger().timestamp();
+        let next_payment_time = auto_pay.last_paid + auto_pay.interval;
+
+        if current_time < next_payment_time {
+            panic_with_error!(&env, EscrowError::IntervalNotElapsed);
+        }
+
+        // 3. Load vault state and check balance
+        let mut state = read_vault_state(&env, &from)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::VaultNotFound));
+
+        // Reject if the source vault was cancelled.
+        if !state.is_active {
+            panic_with_error!(&env, EscrowError::VaultInactive);
+        }
+
+        if state.balance < auto_pay.amount {
+            panic_with_error!(&env, EscrowError::InsufficientBalance);
+        }
+
+        // 4. Resolve recipient address
+        let recipient = resolve(&env, &auto_pay.to);
+
+        // 5. Transfer tokens from contract to recipient
+        let token_client = token::Client::new(&env, &auto_pay.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &auto_pay.amount,
+        );
+
+        // 6. Decrement vault balance
+        state.balance -= auto_pay.amount;
+        write_vault_state(&env, &from, &state);
+
+        // 7. Update last_paid timestamp
+        auto_pay.last_paid = current_time;
+        write_auto_pay(&env, &from, rule_id, &auto_pay);
+
+        // 8. Emit event
+        Events::auto_pay(
+            &env,
+            rule_id,
+            auto_pay.from,
+            auto_pay.to,
+            auto_pay.amount,
+            current_time,
+        );
     }
 }
 
